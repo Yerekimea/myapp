@@ -3,6 +3,7 @@ import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:intl/intl.dart';
 import 'dart:async';
+import 'dart:math' as math;
 import 'services/navigation_service.dart';
 import 'services/weather_service.dart';
 import 'widgets/search_destination.dart';
@@ -10,7 +11,6 @@ import 'widgets/search_destination.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Set Mapbox access token
   MapboxOptions.setAccessToken('pk.eyJ1IjoidG9uYnkiLCJhIjoiY21nbDVzYjdhMHhqMDJycXFxaWlkcnY2YiJ9._0ujjRjoFjGso2ZU4Zn6eQ');
   
   runApp(const MyApp());
@@ -22,13 +22,12 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Mapbox Nigeria',
+      title: 'Naija Navigator',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primaryColor: const Color(0xFF008751),
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF008751),
-          secondary: const Color(0xFFFFFFFF),
         ),
         useMaterial3: true,
         appBarTheme: const AppBarTheme(
@@ -51,13 +50,15 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   MapboxMap? mapboxMap;
+  PointAnnotationManager? _pointAnnotationManager;
+  PolylineAnnotationManager? _polylineAnnotationManager;
   
-  // Services
   final NavigationService _navigationService = NavigationService();
   final WeatherService _weatherService = WeatherService();
   
-  // Navigation state
   NavigationRoute? _currentRoute;
+  List<NavigationRoute>? _alternativeRoutes;
+  NavigationUpdate? _navigationUpdate;
   geo.Position? _currentPosition;
   double _currentSpeed = 0.0;
   WeatherData? _weatherData;
@@ -65,9 +66,10 @@ class _MapScreenState extends State<MapScreen> {
   StreamSubscription<geo.Position>? _positionSubscription;
   bool _isNavigating = false;
   String? _destinationName;
+  Timer? _navigationUpdateTimer;
   
-  // UI state
   bool _showSearch = false;
+  bool _showAlternatives = false;
 
   @override
   void initState() {
@@ -90,7 +92,6 @@ class _MapScreenState extends State<MapScreen> {
           _currentPosition = position;
         });
 
-        // Start tracking speed
         _speedSubscription = _navigationService.getCurrentSpeed().listen((speed) {
           if (mounted) {
             setState(() {
@@ -99,22 +100,58 @@ class _MapScreenState extends State<MapScreen> {
           }
         });
 
-        // Track position updates
         _positionSubscription = geo.Geolocator.getPositionStream(
           locationSettings: const geo.LocationSettings(
             accuracy: geo.LocationAccuracy.high,
-            distanceFilter: 10,
+            distanceFilter: 5,
           ),
         ).listen((position) {
           if (mounted) {
             setState(() {
               _currentPosition = position;
             });
+            _updateVehicleMarker(position);
+            
+            if (_isNavigating && _currentRoute != null) {
+              _updateNavigationProgress(position);
+            }
           }
         });
       }
     } catch (e) {
       print('Error initializing location: $e');
+    }
+  }
+
+  Future<void> _updateVehicleMarker(geo.Position position) async {
+    if (_pointAnnotationManager != null && mapboxMap != null) {
+      await _pointAnnotationManager!.deleteAll();
+      
+      final options = PointAnnotationOptions(
+        geometry: Point(
+          coordinates: Position(position.longitude, position.latitude),
+        ),
+        iconImage: "car",
+        iconSize: 1.5,
+        iconRotate: position.heading,
+      );
+      
+      await _pointAnnotationManager!.create(options);
+    }
+  }
+
+  void _updateNavigationProgress(geo.Position position) {
+    if (_currentRoute != null) {
+      final update = _navigationService.updateNavigation(
+        route: _currentRoute!,
+        currentPosition: position,
+      );
+      
+      if (update != null) {
+        setState(() {
+          _navigationUpdate = update;
+        });
+      }
     }
   }
 
@@ -138,49 +175,107 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
-    _showSnackBar('Calculating route...');
+    _showSnackBar('Calculating routes...');
 
-    final route = await _navigationService.getDirections(
+    final routes = await _navigationService.getDirectionsWithAlternatives(
       startLat: _currentPosition!.latitude,
       startLng: _currentPosition!.longitude,
       endLat: destLat,
       endLng: destLng,
     );
 
-    if (route != null) {
+    if (routes.isNotEmpty) {
       setState(() {
-        _currentRoute = route;
+        _currentRoute = routes.first;
+        _alternativeRoutes = routes.length > 1 ? routes.sublist(1) : null;
         _isNavigating = true;
         _destinationName = name;
         _showSearch = false;
+        _showAlternatives = routes.length > 1;
       });
 
-      // Animate to show route
-      mapboxMap?.flyTo(
-        CameraOptions(
-          center: Point(
-            coordinates: Position(
-              _currentPosition!.longitude,
-              _currentPosition!.latitude,
-            ),
-          ),
-          zoom: 12.0,
-        ),
-        MapAnimationOptions(duration: 1500, startDelay: 0),
-      );
+      await _drawRouteOnMap(_currentRoute!);
+      _fitMapToRoute(_currentRoute!);
+      
+      // Speak first instruction
+      if (_currentRoute!.steps.isNotEmpty) {
+        _navigationService.speak("Navigation started. ${_currentRoute!.steps.first.instruction}");
+      }
 
-      _showSnackBar('Navigation started!');
+      _showSnackBar('Navigation started! ${routes.length > 1 ? "${routes.length - 1} alternative route(s) available" : ""}');
     } else {
       _showSnackBar('Could not calculate route');
     }
   }
 
+  Future<void> _drawRouteOnMap(NavigationRoute route, {bool isAlternative = false}) async {
+    if (_polylineAnnotationManager != null && route.coordinates.isNotEmpty) {
+      final points = route.coordinates.map((coord) {
+        return Position(coord[0], coord[1]);
+      }).toList();
+
+      final options = PolylineAnnotationOptions(
+        geometry: LineString(coordinates: points),
+        lineColor: isAlternative ? Colors.grey.value : const Color(0xFF008751).value,
+        lineWidth: isAlternative ? 4.0 : 6.0,
+        lineOpacity: isAlternative ? 0.5 : 0.9,
+      );
+
+      await _polylineAnnotationManager!.create(options);
+    }
+  }
+
+  void _fitMapToRoute(NavigationRoute route) {
+    if (mapboxMap != null && route.coordinates.isNotEmpty) {
+      final coords = route.coordinates;
+      final firstCoord = coords.first;
+      final lastCoord = coords.last;
+      
+      final centerLat = (firstCoord[1] + lastCoord[1]) / 2;
+      final centerLng = (firstCoord[0] + lastCoord[0]) / 2;
+      
+      mapboxMap?.flyTo(
+        CameraOptions(
+          center: Point(coordinates: Position(centerLng, centerLat)),
+          zoom: 12.0,
+        ),
+        MapAnimationOptions(duration: 1500, startDelay: 0),
+      );
+    }
+  }
+
+  void _selectAlternativeRoute(NavigationRoute route) async {
+    setState(() {
+      _currentRoute = route;
+      _showAlternatives = false;
+    });
+    
+    if (_polylineAnnotationManager != null) {
+      await _polylineAnnotationManager!.deleteAll();
+    }
+    
+    await _drawRouteOnMap(route);
+    _fitMapToRoute(route);
+    _showSnackBar('Route changed');
+  }
+
   void _stopNavigation() {
     setState(() {
       _currentRoute = null;
+      _alternativeRoutes = null;
+      _navigationUpdate = null;
       _isNavigating = false;
       _destinationName = null;
+      _showAlternatives = false;
     });
+    
+    _navigationService.resetNavigation();
+    _navigationUpdateTimer?.cancel();
+    
+    if (_polylineAnnotationManager != null) {
+      _polylineAnnotationManager!.deleteAll();
+    }
+    
     _showSnackBar('Navigation stopped');
   }
 
@@ -196,6 +291,14 @@ class _MapScreenState extends State<MapScreen> {
           ],
         ),
         actions: [
+          if (_showAlternatives && _alternativeRoutes != null)
+            IconButton(
+              icon: const Icon(Icons.alt_route),
+              onPressed: () {
+                _showAlternativeRoutesDialog();
+              },
+              tooltip: 'Alternative Routes',
+            ),
           IconButton(
             icon: Icon(_showSearch ? Icons.close : Icons.search),
             onPressed: () {
@@ -203,30 +306,24 @@ class _MapScreenState extends State<MapScreen> {
                 _showSearch = !_showSearch;
               });
             },
-            tooltip: 'Search',
           ),
           IconButton(
             icon: const Icon(Icons.my_location),
             onPressed: _goToCurrentLocation,
-            tooltip: 'My Location',
           ),
         ],
       ),
       body: Stack(
         children: [
-          // Map
           MapWidget(
-            styleUri: MapboxStyles.MAPBOX_STREETS,
+            styleUri: MapboxStyles.SATELLITE_STREETS, // Detailed satellite + streets
             cameraOptions: CameraOptions(
-              center: Point(
-                coordinates: Position(8.6753, 9.0820),
-              ),
+              center: Point(coordinates: Position(8.6753, 9.0820)),
               zoom: 6.0,
             ),
             onMapCreated: _onMapCreated,
           ),
 
-          // Search bar
           if (_showSearch)
             Positioned(
               top: 16,
@@ -239,8 +336,7 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
 
-          // Speed indicator
-          if (_currentSpeed > 0)
+          if (_currentSpeed > 0 && _isNavigating)
             Positioned(
               top: 16,
               right: 16,
@@ -268,16 +364,12 @@ class _MapScreenState extends State<MapScreen> {
                         color: Color(0xFF008751),
                       ),
                     ),
-                    const Text(
-                      'km/h',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
+                    const Text('km/h', style: TextStyle(fontSize: 12, color: Colors.grey)),
                   ],
                 ),
               ),
             ),
 
-          // Weather widget
           if (_weatherData != null && !_isNavigating)
             Positioned(
               top: 16,
@@ -304,10 +396,7 @@ class _MapScreenState extends State<MapScreen> {
                       children: [
                         Text(
                           _weatherData!.temperatureText,
-                          style: const TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
+                          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                         ),
                         Text(
                           _weatherData!.condition,
@@ -320,7 +409,56 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
 
-          // Navigation info panel
+          // Step-by-step instruction banner
+          if (_isNavigating && _navigationUpdate != null)
+            Positioned(
+              top: 100,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF008751),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.2),
+                      blurRadius: 15,
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.turn_right, color: Colors.white, size: 32),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            _navigationUpdate!.distanceToManeuverText,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      _navigationUpdate!.currentStep.instruction,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
           if (_isNavigating && _currentRoute != null)
             Positioned(
               bottom: 0,
@@ -344,7 +482,6 @@ class _MapScreenState extends State<MapScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Handle bar
                     Container(
                       margin: const EdgeInsets.only(top: 8),
                       width: 40,
@@ -360,7 +497,6 @@ class _MapScreenState extends State<MapScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Destination
                           Row(
                             children: [
                               const Icon(Icons.location_on, color: Color(0xFF008751), size: 28),
@@ -369,19 +505,10 @@ class _MapScreenState extends State<MapScreen> {
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Text(
-                                      'Destination',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.grey,
-                                      ),
-                                    ),
+                                    const Text('Destination', style: TextStyle(fontSize: 12, color: Colors.grey)),
                                     Text(
                                       _destinationName ?? 'Unknown',
-                                      style: const TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.bold,
-                                      ),
+                                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                     ),
@@ -393,7 +520,6 @@ class _MapScreenState extends State<MapScreen> {
                           
                           const SizedBox(height: 20),
                           
-                          // Route info
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
@@ -410,38 +536,15 @@ class _MapScreenState extends State<MapScreen> {
                               _buildInfoCard(
                                 icon: Icons.straighten,
                                 label: 'Distance',
-                                value: _currentRoute!.distanceText,
+                                value: _navigationUpdate != null 
+                                    ? '${(_navigationUpdate!.remainingDistance / 1000).toStringAsFixed(1)} km'
+                                    : _currentRoute!.distanceText,
                               ),
                             ],
                           ),
                           
-                          const SizedBox(height: 20),
-                          
-                          // Next instruction
-                          if (_currentRoute!.steps.isNotEmpty)
-                            Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF008751).withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Row(
-                                children: [
-                                  const Icon(Icons.turn_right, color: Color(0xFF008751)),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Text(
-                                      _currentRoute!.steps.first.instruction,
-                                      style: const TextStyle(fontSize: 14),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          
                           const SizedBox(height: 16),
                           
-                          // Stop navigation button
                           SizedBox(
                             width: double.infinity,
                             child: ElevatedButton(
@@ -454,10 +557,7 @@ class _MapScreenState extends State<MapScreen> {
                                   borderRadius: BorderRadius.circular(8),
                                 ),
                               ),
-                              child: const Text(
-                                'Stop Navigation',
-                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                              ),
+                              child: const Text('Stop Navigation', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                             ),
                           ),
                         ],
@@ -484,36 +584,67 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  Widget _buildInfoCard({
-    required IconData icon,
-    required String label,
-    required String value,
-  }) {
+  void _showAlternativeRoutesDialog() {
+    if (_alternativeRoutes == null) return;
+    
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Alternative Routes',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              ...(_alternativeRoutes!.asMap().entries.map((entry) {
+                final index = entry.key;
+                final route = entry.value;
+                return ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: const Color(0xFF008751),
+                    child: Text('${index + 2}'),
+                  ),
+                  title: Text('Route ${index + 2}'),
+                  subtitle: Text('${route.durationText} • ${route.distanceText}'),
+                  trailing: const Icon(Icons.arrow_forward),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _selectAlternativeRoute(route);
+                  },
+                );
+              }).toList()),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildInfoCard({required IconData icon, required String label, required String value}) {
     return Column(
       children: [
         Icon(icon, color: const Color(0xFF008751), size: 24),
         const SizedBox(height: 4),
-        Text(
-          value,
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF008751),
-          ),
-        ),
-        Text(
-          label,
-          style: const TextStyle(
-            fontSize: 12,
-            color: Colors.grey,
-          ),
-        ),
+        Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF008751))),
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ],
     );
   }
 
-  void _onMapCreated(MapboxMap mapboxMap) {
+  void _onMapCreated(MapboxMap mapboxMap) async {
     this.mapboxMap = mapboxMap;
+    
+    _pointAnnotationManager = await mapboxMap.annotations.createPointAnnotationManager();
+    _polylineAnnotationManager = await mapboxMap.annotations.createPolylineAnnotationManager();
+    
+    if (_currentPosition != null) {
+      _updateVehicleMarker(_currentPosition!);
+    }
   }
 
   Future<void> _goToCurrentLocation() async {
@@ -536,12 +667,7 @@ class _MapScreenState extends State<MapScreen> {
       
       mapboxMap?.flyTo(
         CameraOptions(
-          center: Point(
-            coordinates: Position(
-              position.longitude,
-              position.latitude,
-            ),
-          ),
+          center: Point(coordinates: Position(position.longitude, position.latitude)),
           zoom: 14.0,
         ),
         MapAnimationOptions(duration: 2000, startDelay: 0),
@@ -567,6 +693,8 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _speedSubscription?.cancel();
     _positionSubscription?.cancel();
+    _navigationUpdateTimer?.cancel();
+    _navigationService.stopSpeaking();
     super.dispose();
   }
 }
