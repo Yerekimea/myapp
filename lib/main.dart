@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:intl/intl.dart';
 import 'dart:async';
@@ -10,9 +10,8 @@ import 'package:share_plus/share_plus.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  MapboxOptions.setAccessToken('pk.eyJ1IjoidG9uYnkiLCJhIjoiY21nbDVzYjdhMHhqMDJycXFxaWlkcnY2YiJ9._0ujjRjoFjGso2ZU4Zn6eQ');
-  
+  // Google Maps API key is configured in platform-specific files
+  // (AndroidManifest.xml for Android, Info.plist/AppDelegate.swift for iOS)
   runApp(const MyApp());
 }
 
@@ -49,9 +48,9 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
-  MapboxMap? mapboxMap;
-  PointAnnotationManager? _pointAnnotationManager;
-  PolylineAnnotationManager? _polylineAnnotationManager;
+  GoogleMapController? _mapController;
+  final Set<Marker> _markers = {};
+  final Set<Polyline> _polylines = {};
   
   final NavigationService _navigationService = NavigationService();
   final WeatherService _weatherService = WeatherService();
@@ -70,13 +69,9 @@ class _MapScreenState extends State<MapScreen> {
   
   bool _showSearch = false;
   bool _showAlternatives = false;
-  late String _currentMapStyle;
-  static final String _navigationMapStyle = 'mapbox://styles/mapbox/streets-v12';
-  static final String _defaultMapStyle = MapboxStyles.SATELLITE_STREETS;
 
   @override
   void initState() {
-    _currentMapStyle = _defaultMapStyle;
     super.initState();
     _initializeLocation();
     _loadWeather();
@@ -128,20 +123,19 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Future<void> _updateVehicleMarker(geo.Position position) async {
-    if (_pointAnnotationManager != null && mapboxMap != null) {
-      await _pointAnnotationManager!.deleteAll();
-      
-      final options = PointAnnotationOptions(
-        geometry: Point(
-          coordinates: Position(position.longitude, position.latitude),
+    if (_mapController == null) return;
+    
+    setState(() {
+      _markers.removeWhere((m) => m.markerId.value == 'current_location');
+      _markers.add(
+        Marker(
+          markerId: const MarkerId('current_location'),
+          position: LatLng(position.latitude, position.longitude),
+          infoWindow: const InfoWindow(title: 'Current Location'),
+          rotation: position.heading,
         ),
-        iconImage: "car",
-        iconSize: 1.5,
-        iconRotate: position.heading,
       );
-      
-      await _pointAnnotationManager!.create(options);
-    }
+    });
   }
 
   void _updateNavigationProgress(geo.Position position) {
@@ -196,7 +190,6 @@ class _MapScreenState extends State<MapScreen> {
         _destinationName = name;
         _showSearch = false;
         _showAlternatives = routes.length > 1;
-        _currentMapStyle = _navigationMapStyle;
       });
 
       await _drawRouteOnMap(_currentRoute!);
@@ -214,50 +207,50 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   Future<void> _drawRouteOnMap(NavigationRoute route, {bool isAlternative = false}) async {
-    if (_polylineAnnotationManager != null && route.coordinates.isNotEmpty) {
-      final points = route.coordinates.map((coord) {
-        return Position(coord[0], coord[1]);
-      }).toList();
+    if (route.coordinates.isEmpty) return;
+    
+    final points = route.coordinates.map((coord) {
+      return LatLng(coord[1], coord[0]); // coord is [lng, lat]
+    }).toList();
 
-      final options = PolylineAnnotationOptions(
-        geometry: LineString(coordinates: points),
-        lineColor: isAlternative ? Colors.grey.withAlpha(255).value : const Color(0xFF008751).withAlpha(255).value,
-        lineWidth: isAlternative ? 4.0 : 6.0,
-        lineOpacity: isAlternative ? 0.5 : 0.9,
+    final polylineId = 'route_${DateTime.now().millisecondsSinceEpoch}';
+    setState(() {
+      _polylines.add(
+        Polyline(
+          polylineId: PolylineId(polylineId),
+          points: points,
+          color: isAlternative ? Colors.grey : const Color(0xFF008751),
+          width: isAlternative ? 4 : 6,
+          geodesic: true,
+        ),
       );
-
-      await _polylineAnnotationManager!.create(options);
-    }
+    });
   }
 
   void _fitMapToRoute(NavigationRoute route) {
-    if (mapboxMap != null && route.coordinates.isNotEmpty) {
-      final coords = route.coordinates;
-      final firstCoord = coords.first;
-      final lastCoord = coords.last;
-      
-      final centerLat = (firstCoord[1] + lastCoord[1]) / 2;
-      final centerLng = (firstCoord[0] + lastCoord[0]) / 2;
-      
-      mapboxMap?.flyTo(
-        CameraOptions(
-          center: Point(coordinates: Position(centerLng, centerLat)),
-          zoom: 12.0,
-        ),
-        MapAnimationOptions(duration: 1500, startDelay: 0),
-      );
-    }
+    if (_mapController == null || route.coordinates.isEmpty) return;
+    
+    final coords = route.coordinates;
+    final firstCoord = coords.first;
+    final lastCoord = coords.last;
+    
+    final centerLat = (firstCoord[1] + lastCoord[1]) / 2;
+    final centerLng = (firstCoord[0] + lastCoord[0]) / 2;
+    
+    _mapController?.animateCamera(
+      CameraUpdate.newLatLngZoom(
+        LatLng(centerLat, centerLng),
+        12.0,
+      ),
+    );
   }
 
   void _selectAlternativeRoute(NavigationRoute route) async {
     setState(() {
       _currentRoute = route;
       _showAlternatives = false;
+      _polylines.clear();
     });
-    
-    if (_polylineAnnotationManager != null) {
-      await _polylineAnnotationManager!.deleteAll();
-    }
     
     await _drawRouteOnMap(route);
     _fitMapToRoute(route);
@@ -295,15 +288,11 @@ class _MapScreenState extends State<MapScreen> {
       _isNavigating = false;
       _destinationName = null;
       _showAlternatives = false;
-      _currentMapStyle = _defaultMapStyle;
+      _polylines.clear();
     });
     
     _navigationService.resetNavigation();
     _navigationUpdateTimer?.cancel();
-    
-    if (_polylineAnnotationManager != null) {
-      _polylineAnnotationManager!.deleteAll();
-    }
     
     _showSnackBar('Navigation stopped');
   }
@@ -344,13 +333,17 @@ class _MapScreenState extends State<MapScreen> {
       ),
       body: Stack(
         children: [
-          MapWidget(
-            styleUri: _currentMapStyle, // Dynamic style based on navigation state
-            cameraOptions: CameraOptions(
-              center: Point(coordinates: Position(8.6753, 9.0820)),
+          GoogleMap(
+            initialCameraPosition: const CameraPosition(
+              target: LatLng(9.0820, 8.6753), // Nigeria center
               zoom: 6.0,
             ),
             onMapCreated: _onMapCreated,
+            markers: _markers,
+            polylines: _polylines,
+            myLocationEnabled: true,
+            myLocationButtonEnabled: false, // We have our own button
+            zoomControlsEnabled: false,
           ),
 
           if (_showSearch)
@@ -722,12 +715,8 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  void _onMapCreated(MapboxMap mapboxMap) async {
-    this.mapboxMap = mapboxMap;
-    
-    _pointAnnotationManager = await mapboxMap.annotations.createPointAnnotationManager();
-    _polylineAnnotationManager = await mapboxMap.annotations.createPolylineAnnotationManager();
-    
+  void _onMapCreated(GoogleMapController controller) {
+    _mapController = controller;
     if (_currentPosition != null) {
       _updateVehicleMarker(_currentPosition!);
     }
@@ -751,12 +740,11 @@ class _MapScreenState extends State<MapScreen> {
 
       final position = await geo.Geolocator.getCurrentPosition();
       
-      mapboxMap?.flyTo(
-        CameraOptions(
-          center: Point(coordinates: Position(position.longitude, position.latitude)),
-          zoom: 14.0,
+      _mapController?.animateCamera(
+        CameraUpdate.newLatLngZoom(
+          LatLng(position.latitude, position.longitude),
+          14.0,
         ),
-        MapAnimationOptions(duration: 2000, startDelay: 0),
       );
 
       _showSnackBar('Showing your current location');

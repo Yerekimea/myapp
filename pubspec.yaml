@@ -11,8 +11,8 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # The official, modern Mapbox package
-  mapbox_maps_flutter: ^2.0.0
+  # Google Maps for Flutter
+  google_maps_flutter: ^2.5.0
   
   # For getting the device's GPS location
   geolocator: ^14.0.2

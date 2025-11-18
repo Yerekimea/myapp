@@ -5,7 +5,8 @@ import 'package:geolocator/geolocator.dart' as geo;
 import 'package:flutter_tts/flutter_tts.dart';
 
 class NavigationService {
-  static const String _mapboxToken = 'pk.eyJ1IjoidG9uYnkiLCJhIjoiY21nbDVzYjdhMHhqMDJycXFxaWlkcnY2YiJ9._0ujjRjoFjGso2ZU4Zn6eQ';
+  // IMPORTANT: Set your Google Maps API key here or use platform-specific configuration
+  static const String _googleMapsApiKey = 'YOUR_GOOGLE_MAPS_API_KEY_HERE';
   
   final FlutterTts _tts = FlutterTts();
   int _currentStepIndex = 0;
@@ -29,7 +30,7 @@ class NavigationService {
     await _tts.stop();
   }
   
-  // Get directions with alternatives from Mapbox Directions API
+  // Get directions with alternatives from Google Maps Directions API
   Future<List<NavigationRoute>> getDirectionsWithAlternatives({
     required double startLat,
     required double startLng,
@@ -38,27 +39,26 @@ class NavigationService {
   }) async {
     try {
       final url = Uri.parse(
-        'https://api.mapbox.com/directions/v5/mapbox/driving-traffic/'
-        '$startLng,$startLat;$endLng,$endLat'
-        '?geometries=geojson'
-        '&overview=full'
-        '&steps=true'
+        'https://maps.googleapis.com/maps/api/directions/json'
+        '?origin=$startLat,$startLng'
+        '&destination=$endLat,$endLng'
+        '&mode=driving'
         '&alternatives=true'
-        '&voice_instructions=true'
-        '&banner_instructions=true'
-        '&access_token=$_mapboxToken'
+        '&key=$_googleMapsApiKey'
       );
 
       final response = await http.get(url);
 
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        if (data['routes'] != null && data['routes'].isNotEmpty) {
+        if (data['status'] == 'OK' && data['routes'] != null && data['routes'].isNotEmpty) {
           final routes = <NavigationRoute>[];
           for (var routeData in data['routes']) {
-            routes.add(NavigationRoute.fromJson(routeData));
+            routes.add(NavigationRoute.fromGoogleMapsJson(routeData));
           }
           return routes;
+        } else if (data['status'] != 'OK') {
+          print('Google Maps Directions API error: ${data['status']} - ${data['error_message'] ?? ''}');
         }
       }
       return [];
@@ -223,6 +223,45 @@ class NavigationRoute {
     );
   }
 
+  factory NavigationRoute.fromGoogleMapsJson(Map<String, dynamic> json) {
+    // Extract coordinates from polyline (Google Maps format uses polyline encoding)
+    // For simplicity, we'll reconstruct from legs
+    final legs = json['legs'] as List;
+    final coordinates = <List<double>>[];
+    final steps = <RouteStep>[];
+    double totalDistance = 0;
+    double totalDuration = 0;
+
+    for (var leg in legs) {
+      totalDistance += (leg['distance']['value'] as num).toDouble(); // in meters
+      totalDuration += (leg['duration']['value'] as num).toDouble(); // in seconds
+      
+      final legSteps = leg['steps'] as List;
+      for (var step in legSteps) {
+        steps.add(RouteStep.fromGoogleMapsJson(step));
+        
+        // Extract start location for coordinates
+        final startLoc = step['start_location'];
+        coordinates.add([startLoc['lng'] as double, startLoc['lat'] as double]);
+      }
+      
+      // Add end location of last step in leg
+      if (legSteps.isNotEmpty) {
+        final lastStep = legSteps.last;
+        final endLoc = lastStep['end_location'];
+        coordinates.add([endLoc['lng'] as double, endLoc['lat'] as double]);
+      }
+    }
+
+    return NavigationRoute(
+      distance: totalDistance,
+      duration: totalDuration,
+      steps: steps,
+      coordinates: coordinates,
+      trafficCongestion: null,
+    );
+  }
+
   String get distanceText {
     if (distance < 1000) {
       return '${distance.toInt()} m';
@@ -292,6 +331,33 @@ class RouteStep {
       startLng: maneuverLocation[0],
       endLat: endLat,
       endLng: endLng,
+    );
+  }
+
+  factory RouteStep.fromGoogleMapsJson(Map<String, dynamic> json) {
+    final startLoc = json['start_location'];
+    final endLoc = json['end_location'];
+    
+    // Extract instruction from HTML instructions
+    String instruction = json['html_instructions'] ?? '';
+    // Remove HTML tags
+    instruction = instruction.replaceAll(RegExp(r'<[^>]*>'), '');
+    // Decode HTML entities
+    instruction = instruction
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&amp;', '&');
+    
+    return RouteStep(
+      instruction: instruction,
+      distance: (json['distance']['value'] as num).toDouble(),
+      duration: (json['duration']['value'] as num).toDouble(),
+      maneuver: json['maneuver'],
+      startLat: (startLoc['lat'] as num).toDouble(),
+      startLng: (startLoc['lng'] as num).toDouble(),
+      endLat: (endLoc['lat'] as num).toDouble(),
+      endLng: (endLoc['lng'] as num).toDouble(),
     );
   }
   
