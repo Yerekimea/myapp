@@ -3,10 +3,10 @@ import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:intl/intl.dart';
 import 'dart:async';
-import 'dart:math' as math;
 import 'services/navigation_service.dart';
 import 'services/weather_service.dart';
 import 'widgets/search_destination.dart';
+import 'package:share_plus/share_plus.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -70,9 +70,13 @@ class _MapScreenState extends State<MapScreen> {
   
   bool _showSearch = false;
   bool _showAlternatives = false;
+  late String _currentMapStyle;
+  static final String _navigationMapStyle = 'mapbox://styles/mapbox/streets-v12';
+  static final String _defaultMapStyle = MapboxStyles.SATELLITE_STREETS;
 
   @override
   void initState() {
+    _currentMapStyle = _defaultMapStyle;
     super.initState();
     _initializeLocation();
     _loadWeather();
@@ -192,6 +196,7 @@ class _MapScreenState extends State<MapScreen> {
         _destinationName = name;
         _showSearch = false;
         _showAlternatives = routes.length > 1;
+        _currentMapStyle = _navigationMapStyle;
       });
 
       await _drawRouteOnMap(_currentRoute!);
@@ -216,7 +221,7 @@ class _MapScreenState extends State<MapScreen> {
 
       final options = PolylineAnnotationOptions(
         geometry: LineString(coordinates: points),
-        lineColor: isAlternative ? Colors.grey.value : const Color(0xFF008751).value,
+        lineColor: isAlternative ? Colors.grey.withAlpha(255).value : const Color(0xFF008751).withAlpha(255).value,
         lineWidth: isAlternative ? 4.0 : 6.0,
         lineOpacity: isAlternative ? 0.5 : 0.9,
       );
@@ -259,6 +264,29 @@ class _MapScreenState extends State<MapScreen> {
     _showSnackBar('Route changed');
   }
 
+  void _shareEta() {
+    if (_currentRoute == null) {
+      _showSnackBar('No active route to share');
+      return;
+    }
+
+    final eta = _currentRoute!.estimatedArrival;
+    final etaText = DateFormat('yyyy-MM-dd HH:mm').format(eta);
+
+    final dest = _destinationName ?? 'Destination';
+
+    String mapsLink = '';
+    if (_currentPosition != null) {
+      mapsLink = 'https://www.google.com/maps/dir/?api=1&origin=${_currentPosition!.latitude},${_currentPosition!.longitude}&destination=${_currentRoute!.coordinates.last[1]},${_currentRoute!.coordinates.last[0]}&travelmode=driving';
+    } else {
+      mapsLink = 'https://www.google.com/maps/search/?api=1&query=${_currentRoute!.coordinates.last[1]},${_currentRoute!.coordinates.last[0]}';
+    }
+
+    final shareText = 'Heading to $dest\nETA: $etaText\nTrack: $mapsLink';
+
+    SharePlus.instance.share(ShareParams(text: shareText, title: 'My ETA to $dest'));
+  }
+
   void _stopNavigation() {
     setState(() {
       _currentRoute = null;
@@ -267,6 +295,7 @@ class _MapScreenState extends State<MapScreen> {
       _isNavigating = false;
       _destinationName = null;
       _showAlternatives = false;
+      _currentMapStyle = _defaultMapStyle;
     });
     
     _navigationService.resetNavigation();
@@ -316,7 +345,7 @@ class _MapScreenState extends State<MapScreen> {
       body: Stack(
         children: [
           MapWidget(
-            styleUri: MapboxStyles.SATELLITE_STREETS, // Detailed satellite + streets
+            styleUri: _currentMapStyle, // Dynamic style based on navigation state
             cameraOptions: CameraOptions(
               center: Point(coordinates: Position(8.6753, 9.0820)),
               zoom: 6.0,
@@ -347,7 +376,7 @@ class _MapScreenState extends State<MapScreen> {
                   borderRadius: BorderRadius.circular(12),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
+                      color: Colors.black.withValues(alpha: 0.1),
                       blurRadius: 10,
                     ),
                   ],
@@ -381,7 +410,7 @@ class _MapScreenState extends State<MapScreen> {
                   borderRadius: BorderRadius.circular(12),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
+                      color: Colors.black.withValues(alpha: 0.1),
                       blurRadius: 10,
                     ),
                   ],
@@ -409,7 +438,7 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
 
-          // Step-by-step instruction banner
+          // Enhanced step-by-step instruction banner
           if (_isNavigating && _navigationUpdate != null)
             Positioned(
               top: 100,
@@ -419,40 +448,73 @@ class _MapScreenState extends State<MapScreen> {
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: const Color(0xFF008751),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.2),
-                      blurRadius: 15,
+                      color: Colors.black.withValues(alpha: 0.3),
+                      blurRadius: 20,
+                      offset: const Offset(0, 8),
                     ),
                   ],
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.turn_right, color: Colors.white, size: 32),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
+                    // Distance indicator with progress
+                    Container(
+                      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
                             _navigationUpdate!.distanceToManeuverText,
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 24,
+                              fontSize: 20,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
+                          Text(
+                            'Remaining: ${(_navigationUpdate!.remainingDistance / 1000).toStringAsFixed(1)} km',
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    // Maneuver instruction
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(Icons.turn_right, color: Colors.white, size: 28),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            _navigationUpdate!.currentStep.instruction,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w500,
+                              height: 1.3,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _navigationUpdate!.currentStep.instruction,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                      ),
                     ),
                   ],
                 ),
@@ -473,7 +535,7 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.2),
+                      color: Colors.black.withValues(alpha: 0.2),
                       blurRadius: 15,
                       offset: const Offset(0, -5),
                     ),
@@ -547,17 +609,41 @@ class _MapScreenState extends State<MapScreen> {
                           
                           SizedBox(
                             width: double.infinity,
-                            child: ElevatedButton(
-                              onPressed: _stopNavigation,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.red,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(vertical: 16),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(8),
+                            child: Column(
+                              children: [
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: ElevatedButton.icon(
+                                    onPressed: _shareEta,
+                                    icon: const Icon(Icons.share),
+                                    label: const Text('Share ETA'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF008751),
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(vertical: 14),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
-                              child: const Text('Stop Navigation', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 12),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: ElevatedButton(
+                                    onPressed: _stopNavigation,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.red,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(vertical: 16),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                    ),
+                                    child: const Text('Stop Navigation', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],

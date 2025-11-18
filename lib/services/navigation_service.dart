@@ -9,7 +9,6 @@ class NavigationService {
   
   final FlutterTts _tts = FlutterTts();
   int _currentStepIndex = 0;
-  geo.Position? _lastPosition;
   
   NavigationService() {
     _initializeTts();
@@ -90,11 +89,8 @@ class NavigationService {
     required NavigationRoute route,
     required geo.Position currentPosition,
   }) {
-    _lastPosition = currentPosition;
-    
     // Find current step based on proximity
     for (int i = _currentStepIndex; i < route.steps.length; i++) {
-      final step = route.steps[i];
       // Simple distance check - in production, use more sophisticated logic
       if (i < route.steps.length - 1) {
         final nextStep = route.steps[i + 1];
@@ -157,7 +153,6 @@ class NavigationService {
   
   void resetNavigation() {
     _currentStepIndex = 0;
-    _lastPosition = null;
     stopSpeaking();
   }
 
