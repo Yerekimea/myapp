@@ -3,11 +3,12 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class NavigationService {
-  // IMPORTANT: Set your Google Maps API key here or use platform-specific configuration
-  static const String _googleMapsApiKey = 'YOUR_GOOGLE_MAPS_API_KEY_HERE';
-  
+  // Read Google Maps API key from environment (.env)
+  final String _googleMapsApiKey = dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '';
+
   final FlutterTts _tts = FlutterTts();
   int _currentStepIndex = 0;
   

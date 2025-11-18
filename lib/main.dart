@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:intl/intl.dart';
 import 'dart:async';
 import 'services/navigation_service.dart';
@@ -8,10 +9,10 @@ import 'services/weather_service.dart';
 import 'widgets/search_destination.dart';
 import 'package:share_plus/share_plus.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Google Maps API key is configured in platform-specific files
-  // (AndroidManifest.xml for Android, Info.plist/AppDelegate.swift for iOS)
+  // Load environment variables from .env (create a .env file from .env.example)
+  await dotenv.load(fileName: '.env');
   runApp(const MyApp());
 }
 

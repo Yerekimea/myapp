@@ -33,6 +33,9 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# Environment file (do not commit your real keys)
+.env
+
 # Symbolication related
 app.*.symbols
 
